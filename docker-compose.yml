@@ -18,6 +18,9 @@ services:
       - REGISTRATION_DISABLED=${REGISTRATION_DISABLED:-false}
       # Set to "true" for demo mode (1.5GB per-user memory limit)
       - DEMO_MODE=${DEMO_MODE:-false}
+      # DANGEROUS: Set to "true" to allow login as any username with no password
+      # (username only used to separate sessions). Do NOT use in production.
+      - DANGEROUSLY_SKIP_AUTH=${DANGEROUSLY_SKIP_AUTH:-false}
       # Uncomment these for SMTP sending
       # - SMTP_HOST=${SMTP_HOST}
       # - SMTP_PORT=${SMTP_PORT}
@@ -39,6 +42,9 @@ services:
       fi;
       if [ \"$$DEMO_MODE\" = \"true\" ]; then
         FLAGS=\"$$FLAGS --demo\";
+      fi;
+      if [ \"$$DANGEROUSLY_SKIP_AUTH\" = \"true\" ]; then
+        FLAGS=\"$$FLAGS --dangerously-skip-auth\";
       fi;
       python main.py $$FLAGS"
 
