@@ -255,11 +255,17 @@ class SEOExtractor:
         return properties
 
     @staticmethod
-    def create_empty_result(url, depth, status_code=0, error=None):
-        """Create an empty result structure"""
+    def create_empty_result(url, depth, status_code=0, error=None, error_type=None):
+        """Create an empty result structure.
+
+        error_type: optional classification when status_code is 0 (no HTTP
+        response). Values: 'dns_not_found', 'connection_refused', 'timeout',
+        'ssl_error', 'connection_error', 'file_too_large', or None.
+        """
         return {
             'url': url,
             'status_code': status_code,
+            'error_type': error_type,
             'content_type': '',
             'size': 0,
             'is_internal': False,

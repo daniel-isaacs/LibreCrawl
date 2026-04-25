@@ -131,6 +131,33 @@ class IssueDetector:
         url = result.get('url', '')
         status_code = result.get('status_code', 0)
 
+        # No HTTP response at all (DNS failure, connection refused, timeout, etc.)
+        if status_code == 0:
+            error_type = result.get('error_type')
+            error_label_map = {
+                'dns_not_found': ('DNS Not Found',
+                                  'Domain does not resolve. The site may be expired or misconfigured.'),
+                'connection_refused': ('Connection Refused',
+                                       'Server actively refused the connection.'),
+                'timeout': ('Request Timeout',
+                            'Server did not respond before the request timed out.'),
+                'ssl_error': ('SSL/TLS Error',
+                              'Could not establish a secure connection (certificate or TLS issue).'),
+                'connection_error': ('Connection Error',
+                                     'Could not connect to the server.'),
+            }
+            if error_type and error_type != 'file_too_large':
+                title, default_details = error_label_map.get(
+                    error_type, ('No Response', 'No HTTP response received.')
+                )
+                issues.append({
+                    'url': url,
+                    'type': 'error',
+                    'category': 'Technical',
+                    'issue': title,
+                    'details': result.get('error') or default_details
+                })
+
         if status_code >= 400 and status_code < 500:
             issues.append({
                 'url': url,

@@ -3,6 +3,8 @@ Main web crawler orchestrator with smooth rate limiting and modular architecture
 Refactored for better code practices and maintainability.
 """
 import requests
+import socket
+import ssl
 import threading
 import time
 import asyncio
@@ -12,6 +14,55 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 from urllib.robotparser import RobotFileParser
 import nest_asyncio
+
+
+def classify_fetch_error(exc_or_msg):
+    """Classify a failed-fetch error into a coarse error_type.
+
+    Accepts either an exception (walks the cause chain to handle
+    requests/urllib3 wrappers) or a raw error string (from Playwright).
+    Falls back to message inspection.
+
+    Returns one of: 'dns_not_found', 'timeout', 'connection_refused',
+    'ssl_error', 'connection_error'.
+    """
+    if isinstance(exc_or_msg, BaseException):
+        seen = set()
+        cur = exc_or_msg
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if isinstance(cur, socket.gaierror):
+                return 'dns_not_found'
+            if isinstance(cur, ssl.SSLError) or isinstance(cur, requests.exceptions.SSLError):
+                return 'ssl_error'
+            if isinstance(cur, ConnectionRefusedError):
+                return 'connection_refused'
+            if isinstance(cur, (socket.timeout, requests.exceptions.Timeout)):
+                return 'timeout'
+            cur = getattr(cur, '__cause__', None) or getattr(cur, '__context__', None)
+
+    msg = str(exc_or_msg).lower()
+    dns_markers = (
+        'getaddrinfo failed',
+        'name or service not known',
+        'name resolution',
+        'nodename nor servname',
+        'no address associated',
+        'name does not resolve',
+        'temporary failure in name resolution',
+        'name_not_resolved',
+        'err_name_not_resolved',
+        'nxdomain',
+    )
+    if any(m in msg for m in dns_markers):
+        return 'dns_not_found'
+    if 'timed out' in msg or 'timeout' in msg:
+        return 'timeout'
+    if 'refused' in msg or 'err_connection_refused' in msg:
+        return 'connection_refused'
+    if 'ssl' in msg or 'certificate' in msg or 'err_cert' in msg or 'tls' in msg:
+        return 'ssl_error'
+    return 'connection_error'
 
 from src.core.rate_limiter import RateLimiter
 from src.core.seo_extractor import SEOExtractor
@@ -219,12 +270,6 @@ class WebCrawler:
             parsed = urlparse(url)
             self.base_url = f"{parsed.scheme}://{parsed.netloc}"
             self.base_domain = parsed.netloc
-
-            # If URL has a path (not just domain), set max_depth to 0 to only crawl that page
-            has_path = parsed.path and parsed.path not in ('/', '')
-            if has_path:
-                print(f"URL has path '{parsed.path}' - limiting crawl to single page only")
-                self.config['max_depth'] = 0
 
             # Create database crawl record if session_id provided
             if session_id:
@@ -842,7 +887,8 @@ class WebCrawler:
                     if content_length and int(content_length) > self.config['max_file_size']:
                         return self.seo_extractor.create_empty_result(
                             url, depth, 0,
-                            f'File too large: {content_length} bytes'
+                            f'File too large: {content_length} bytes',
+                            error_type='file_too_large'
                         )
                 except:
                     pass  # Continue if HEAD request fails
@@ -869,6 +915,7 @@ class WebCrawler:
             result = {
                 'url': url,
                 'status_code': response.status_code,
+                'error_type': None,
                 'content_type': response.headers.get('content-type', '').split(';')[0],
                 'size': len(response.content),
                 'is_internal': is_internal,
@@ -962,7 +1009,10 @@ class WebCrawler:
             return result
 
         except Exception as e:
-            return self.seo_extractor.create_empty_result(url, depth, 0, str(e))
+            return self.seo_extractor.create_empty_result(
+                url, depth, 0, str(e),
+                error_type=classify_fetch_error(e)
+            )
 
     async def _crawl_url_with_javascript(self, url, depth):
         """Crawl a single URL using JavaScript rendering"""
@@ -973,7 +1023,10 @@ class WebCrawler:
             html_content, status_code, error = await self.js_renderer.render_page(url)
 
             if error:
-                return self.seo_extractor.create_empty_result(url, depth, status_code, error)
+                return self.seo_extractor.create_empty_result(
+                    url, depth, status_code, error,
+                    error_type=classify_fetch_error(error) if status_code == 0 else None
+                )
 
             # Determine if URL is internal
             is_internal = self.link_manager.is_internal(url)
@@ -982,6 +1035,7 @@ class WebCrawler:
             result = {
                 'url': url,
                 'status_code': status_code,
+                'error_type': None,
                 'content_type': 'text/html',
                 'size': len(html_content.encode('utf-8')),
                 'is_internal': is_internal,
@@ -1075,7 +1129,10 @@ class WebCrawler:
             return result
 
         except Exception as e:
-            return self.seo_extractor.create_empty_result(url, depth, 0, f'JavaScript rendering error: {str(e)}')
+            return self.seo_extractor.create_empty_result(
+                url, depth, 0, f'JavaScript rendering error: {str(e)}',
+                error_type=classify_fetch_error(e)
+            )
 
     async def _crawl_async_with_js(self):
         """Async crawling loop for JavaScript rendering"""

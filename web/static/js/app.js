@@ -1237,6 +1237,9 @@ function filterVirtualScrollerData(scrollerName, filterType) {
                     return url.status_code >= 400 && url.status_code < 500;
                 case '5xx':
                     return url.status_code >= 500;
+                case 'no_response':
+                    return (url.status_code === 0 || url.status_code === null || url.status_code === undefined)
+                        && url.error_type !== 'file_too_large';
                 case 'html':
                     return (url.content_type || '').toLowerCase().includes('html');
                 case 'css':
@@ -1295,6 +1298,7 @@ function updateFilterCounts() {
         '3xx': 0,
         '4xx': 0,
         '5xx': 0,
+        no_response: 0,
         html: 0,
         css: 0,
         js: 0,
@@ -1312,6 +1316,7 @@ function updateFilterCounts() {
         else if (statusCode >= 300 && statusCode < 400) counts['3xx']++;
         else if (statusCode >= 400 && statusCode < 500) counts['4xx']++;
         else if (statusCode >= 500) counts['5xx']++;
+        else if ((url.status_code === 0 || isNaN(statusCode)) && url.error_type !== 'file_too_large') counts.no_response++;
 
         // Count by content type
         const contentType = url.content_type || '';
@@ -1363,6 +1368,11 @@ function updateStatusCodesTable(filterType = null) {
             const status = parseInt(url.status_code);
             return status >= 500;
         });
+    } else if (filterType === 'no_response') {
+        filteredUrls = crawlState.urls.filter(url =>
+            (url.status_code === 0 || url.status_code === null || url.status_code === undefined)
+            && url.error_type !== 'file_too_large'
+        );
     } else if (filterType === 'html') {
         filteredUrls = crawlState.urls.filter(url => (url.content_type || '').includes('html'));
     } else if (filterType === 'css') {
@@ -1376,25 +1386,41 @@ function updateStatusCodesTable(filterType = null) {
     let totalUrls = filteredUrls.length;
 
     filteredUrls.forEach(url => {
-        const statusCode = url.status_code;
-        if (statusCounts[statusCode]) {
-            statusCounts[statusCode]++;
-        } else {
-            statusCounts[statusCode] = 1;
-        }
+        // Group status_code=0 rows by error_type so DNS / timeout / refused
+        // show as distinct rows instead of collapsing into a single "0".
+        const isZero = url.status_code === 0 || url.status_code === null || url.status_code === undefined;
+        const key = isZero ? `0|${url.error_type || 'unknown'}` : String(url.status_code);
+        statusCounts[key] = (statusCounts[key] || 0) + 1;
     });
 
     // Clear existing rows
     tbody.innerHTML = '';
 
-    // Add rows for each status code
-    Object.keys(statusCounts).sort((a, b) => parseInt(a) - parseInt(b)).forEach(statusCode => {
-        const count = statusCounts[statusCode];
+    // Sort: real HTTP codes first (numeric), then no-response variants
+    const keys = Object.keys(statusCounts).sort((a, b) => {
+        const aIsZero = a.startsWith('0|');
+        const bIsZero = b.startsWith('0|');
+        if (aIsZero && !bIsZero) return 1;
+        if (!aIsZero && bIsZero) return -1;
+        if (aIsZero && bIsZero) return a.localeCompare(b);
+        return parseInt(a) - parseInt(b);
+    });
+
+    keys.forEach(key => {
+        const count = statusCounts[key];
         const percentage = totalUrls > 0 ? ((count / totalUrls) * 100).toFixed(1) : 0;
-        const statusText = getStatusCodeText(parseInt(statusCode));
+        let displayCode, statusText;
+        if (key.startsWith('0|')) {
+            const errorType = key.slice(2);
+            displayCode = '0';
+            statusText = getStatusCodeText(0, errorType);
+        } else {
+            displayCode = key;
+            statusText = getStatusCodeText(parseInt(key));
+        }
 
         addRowToTable('statusCodesTableBody', [
-            statusCode,
+            displayCode,
             statusText,
             count,
             percentage + '%'
@@ -1402,7 +1428,7 @@ function updateStatusCodesTable(filterType = null) {
     });
 }
 
-function getStatusCodeText(statusCode) {
+function getStatusCodeText(statusCode, errorType) {
     if (statusCode >= 200 && statusCode < 300) {
         return 'Success';
     } else if (statusCode >= 300 && statusCode < 400) {
@@ -1412,7 +1438,15 @@ function getStatusCodeText(statusCode) {
     } else if (statusCode >= 500) {
         return 'Server Error';
     } else if (statusCode === 0) {
-        return 'Failed/Timeout';
+        switch (errorType) {
+            case 'dns_not_found':       return 'DNS Not Found';
+            case 'connection_refused':  return 'Connection Refused';
+            case 'timeout':             return 'Timeout';
+            case 'ssl_error':           return 'SSL/TLS Error';
+            case 'connection_error':    return 'Connection Error';
+            case 'file_too_large':      return 'Skipped (file too large)';
+            default:                    return 'No Response';
+        }
     } else {
         return 'Unknown';
     }
@@ -1731,10 +1765,11 @@ function showUrlDetails(url) {
                         <div class="details-section">
                             <h4>⚡ Performance</h4>
                             <div class="details-grid">
-                                <div><strong>Status Code:</strong> ${urlData.status_code}</div>
+                                <div><strong>Status Code:</strong> ${urlData.status_code}${urlData.error_type ? ' (' + escapeHtml(getStatusCodeText(parseInt(urlData.status_code) || 0, urlData.error_type)) + ')' : ''}</div>
                                 <div><strong>Response Time:</strong> ${urlData.response_time || 0}ms</div>
                                 <div><strong>Content Type:</strong> ${safeContentType}</div>
                                 <div><strong>Size:</strong> ${urlData.size || 0} bytes</div>
+                                ${urlData.error ? `<div><strong>Error:</strong> ${escapeHtml(urlData.error)}</div>` : ''}
                             </div>
                         </div>
 
